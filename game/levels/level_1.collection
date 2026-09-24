@@ -1,0 +1,26 @@
+name: "level_1"
+instances {
+  id: "piton"
+  prototype: "/game/piton/piton.go"
+  position {
+    x: -717.3433
+    y: 0.431159
+  }
+}
+instances {
+  id: "piton1"
+  prototype: "/game/piton/piton.go"
+  position {
+    x: 207.65668
+    y: 234.43115
+  }
+}
+instances {
+  id: "piton2"
+  prototype: "/game/piton/piton.go"
+  position {
+    x: 350.65668
+    y: -247.56885
+  }
+}
+scale_along_z: 0

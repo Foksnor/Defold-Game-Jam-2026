@@ -1,0 +1,37 @@
+name: "main"
+instances {
+  id: "bg"
+  prototype: "/game/bg/bg.go"
+  scale3 {
+    x: 1.354848
+    y: 1.200501
+  }
+}
+collection_instances {
+  id: "level_1"
+  collection: "/game/levels/level_1.collection"
+}
+collection_instances {
+  id: "rope"
+  collection: "/game/rope/rope.collection"
+  position {
+    x: -889.0
+    y: 144.0
+  }
+}
+scale_along_z: 0
+embedded_instances {
+  id: "camera"
+  data: "embedded_components {\n"
+  "  id: \"camera\"\n"
+  "  type: \"camera\"\n"
+  "  data: \"aspect_ratio: 1.0\\n"
+  "fov: 0.7854\\n"
+  "near_z: -0.1\\n"
+  "far_z: 1000.0\\n"
+  "orthographic_projection: 1\\n"
+  "orthographic_zoom: 0.5\\n"
+  "\"\n"
+  "}\n"
+  ""
+}

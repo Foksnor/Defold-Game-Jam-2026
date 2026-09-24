@@ -1,0 +1,286 @@
+local LENGTH = 20          -- Must match the segment collision-shape length
+local HALF = LENGTH / 2    -- Used for hinge join placement
+local MAX_SEGMENTS = 120
+local PICK_RADIUS = 18
+local DRAG_FOLLOW_SPEED = 1800
+local EXTEND_DISTANCE = LENGTH
+
+local function collider(id)
+    return msg.url(nil, id, "collisionobject")
+end
+
+local function stop_rope(self)
+    -- Stop the front segment, so the rope physcis aren't making it float/drift away
+    local front_id = self.segments[#self.segments]
+    if not front_id or not go.exists(front_id) then
+        return
+    end
+
+    local body = collider(front_id)
+    go.set(body, "linear_velocity", vmath.vector3())
+    go.set(body, "angular_velocity", vmath.vector3())
+end
+
+local function cursor_world(action, z)
+    local p = camera.screen_xy_to_world(
+        action.screen_x, action.screen_y
+    )
+    p.z = z
+    return p
+end
+
+local function ends_of(id)
+    local center = go.get_world_position(id)
+    local half_axis = vmath.rotate(
+        go.get_world_rotation(id),
+        vmath.vector3(HALF, 0, 0)
+    )
+
+    local tip = center + half_axis
+    local base = center - half_axis
+    local direction = vmath.normalize(half_axis)
+    return tip, base, direction
+end
+
+local function point_segment_distance(point, a, b)
+    local ab = b - a
+    local length_squared = vmath.length_sqr(ab)
+    if length_squared == 0 then
+        return vmath.length(point - a)
+    end
+
+    local t = vmath.dot(point - a, ab) / length_squared
+    t = math.max(0, math.min(1, t))
+    return vmath.length(point - (a + ab * t))
+end
+
+local function can_pick_rope(self, point)
+    local number = #self.segments
+    if number == 0 then
+        return vmath.length(point - self.start) <= PICK_RADIUS
+    end
+
+    -- The front segment is the part the player holds. 
+    -- Internally it is the last item because segments are stored from the anchor outwards.
+    local tip, base = ends_of(self.segments[number])
+    return point_segment_distance(point, base, tip) <= PICK_RADIUS
+end
+
+local function move_tip_toward_cursor(id, cursor, dt)
+    local tip = ends_of(id)
+    local difference = cursor - tip
+    local body = collider(id)
+    local velocity = vmath.vector3()
+
+    if dt > 0 and vmath.length_sqr(difference) > 0 then
+        velocity = difference * (1 / dt)
+        local speed = vmath.length(velocity)
+        if speed > DRAG_FOLLOW_SPEED then
+            velocity = vmath.normalize(velocity) * DRAG_FOLLOW_SPEED
+        end
+    end
+
+    -- Move the front segment toward the cursor, but let physics collisions win.
+    -- (The front segment is a physics body, so it should collide with objects, and not teleport to the mouse cursor)
+    go.set(body, "linear_velocity", velocity)
+end
+
+local function add_segment(self, base, direction)
+    local number = #self.segments + 1
+    self.next_joint_id = self.next_joint_id + 1
+    local joint_name = "hinge_" .. self.next_joint_id
+    local center = base + direction * HALF
+    local angle = math.atan2(direction.y, direction.x)
+    local rotation = vmath.quat_rotation_z(angle)
+
+    local id = factory.create(
+        "#fac_rope_segment", center, rotation, nil, 1
+    )
+    assert(id, "Could not create rope segment")
+
+    self.segments[number] = id
+    self.joint_names[number] = joint_name
+    self.pending_joint = true
+
+    -- Give the new collision object a frame to become ready.
+    timer.delay(0, false, function(self)
+        local previous
+        local previous_end
+
+        if number == 1 then
+            previous = "#anchor"
+            previous_end = vmath.vector3(0, 0, 0)
+        else
+            previous = collider(self.segments[number - 1])
+            previous_end = vmath.vector3(HALF, 0, 0)
+        end
+
+        physics.create_joint(
+            physics.JOINT_TYPE_HINGE,
+            previous,
+            joint_name,
+            previous_end,
+            collider(id),
+            vmath.vector3(-HALF, 0, 0),
+            { collide_connected = false }
+        )
+
+        self.pending_joint = false
+    end)
+end
+
+local function get_front_pull(self, front_id)
+    local tip, _, direction = ends_of(front_id)
+    local to_cursor = self.cursor - tip
+    local pulled_far = vmath.length(to_cursor) >= EXTEND_DISTANCE
+    local is_pulling_outward = false
+
+    if pulled_far then
+        local cursor_distance = vmath.length(self.cursor - self.start)
+        local tip_distance = vmath.length(tip - self.start)
+        is_pulling_outward = cursor_distance >= tip_distance
+    end
+
+    return tip, direction, to_cursor, is_pulling_outward
+end
+
+local function add_segments(self, base, direction, count)
+    for _ = 1, count do
+        add_segment(self, base, direction)
+        base = base + direction * LENGTH
+    end
+end
+
+local function unpin_front(self)
+    if not self.front_pinned then
+        return
+    end
+
+    physics.destroy_joint("#anchor", "held_tip")
+    self.front_pinned = false
+end
+
+local function pin_front(self)
+    local front_id = self.segments[#self.segments]
+    if not front_id or not go.exists(front_id) then
+        return
+    end
+
+    unpin_front(self)
+    local tip = ends_of(front_id)
+    physics.create_joint(
+        physics.JOINT_TYPE_HINGE,
+        "#anchor",
+        "held_tip",
+        tip - self.start,
+        collider(front_id),
+        vmath.vector3(HALF, 0, 0),
+        { collide_connected = false }
+    )
+    self.front_pinned = true
+    stop_rope(self)
+end
+
+function init(self)
+    self.start = go.get_world_position()
+    self.segments = {}
+    self.joint_names = {}
+    self.next_joint_id = 0
+    self.dragging = false
+    self.pending_joint = false
+    self.pin_on_ready = false
+    msg.post(".", "acquire_input_focus")
+end
+
+function on_input(self, action_id, action)
+    if action.screen_x and action.screen_y then
+        self.cursor = cursor_world(action, self.start.z)
+    end
+
+    if action_id == hash("touch") then
+        if action.pressed and self.cursor then
+            self.dragging = can_pick_rope(self, self.cursor)
+            if self.dragging then
+                self.pin_on_ready = false
+                unpin_front(self)
+            end
+        elseif action.released then
+            self.dragging = false
+            if self.pending_joint then
+                self.pin_on_ready = true
+            else
+                pin_front(self)
+            end
+        end
+    end
+end
+
+function update(self, dt)
+    if not self.dragging then
+        if self.pin_on_ready and not self.pending_joint then
+            self.pin_on_ready = false
+            pin_front(self)
+        end
+
+        stop_rope(self)
+        return
+    end
+
+    if not self.cursor or self.pending_joint then
+        return
+    end
+
+    local number = #self.segments
+
+    if number == 0 then
+        local distance = vmath.length(self.cursor - self.start)
+        local required_count = math.ceil(distance / LENGTH)
+
+        if required_count > 0 then
+            local to_cursor = self.cursor - self.start
+            local direction = vmath.normalize(to_cursor)
+            add_segments(self, self.start, direction, required_count)
+        else
+            -- Draw a short guide line before a full segment can be created.
+            msg.post("@render:", "draw_line", {
+                start_point = self.start,
+                end_point = self.cursor,
+                color = vmath.vector4(1, 0.2, 0.25, 1)
+            })
+        end
+        return
+    end
+
+    local front_id = self.segments[number]
+    local tip, direction, to_cursor, pulling_outward =
+        get_front_pull(self, front_id)
+
+    -- Dispense rope when the cursor is at least one segment beyond the front
+    -- tip and the pull is moving away from the anchor.
+    if number < MAX_SEGMENTS
+        and pulling_outward then
+        local add_direction = direction
+        if vmath.length_sqr(to_cursor) > 0 then
+            add_direction = vmath.normalize(to_cursor)
+        end
+        local distance_count = math.ceil(
+            vmath.length(to_cursor) / LENGTH
+        )
+        local add_count = math.min(
+            distance_count,
+            MAX_SEGMENTS - number
+        )
+        add_segments(self, tip, add_direction, add_count)
+        return
+    end
+
+    move_tip_toward_cursor(front_id, self.cursor, dt)
+end
+
+function final(self)
+    for _, id in ipairs(self.segments) do
+        if go.exists(id) then
+            go.delete(id)
+        end
+    end
+end

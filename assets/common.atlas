@@ -1,0 +1,10 @@
+images {
+  image: "/assets/bg/bg.png"
+}
+images {
+  image: "/assets/piton.png"
+}
+images {
+  image: "/assets/rope_segment.png"
+}
+extrude_borders: 2
